@@ -1,38 +1,57 @@
-import mongoose from 'mongoose';
+import * as http from 'http';
 import app from '../routes';
 import logger from '../logger';
 import config from '../config';
 import { LoggifyClass } from '../decorators/Loggify';
-import { Storage } from './storage';
+import { Storage, StorageService } from './storage';
+import { Socket, SocketService } from './socket';
+import { ConfigService, Config } from './config';
 
 @LoggifyClass
 export class ApiService {
-
   port: number;
   timeout: number;
+  configService: ConfigService;
+  storageService: StorageService;
+  socketService: SocketService;
+  httpServer: http.Server;
 
-  constructor(options){
-    const {
-      port,
-      timeout
-    } = options;
-
-    this.port = port || 3000;
-    this.timeout = timeout || 600000;
+  constructor({
+    port = 3000,
+    timeout = 600000,
+    configService = Config,
+    storageService = Storage,
+    socketService = Socket
+  } = {}) {
+    this.port = port;
+    this.timeout = timeout;
+    this.configService = configService;
+    this.storageService = storageService;
+    this.socketService = socketService;
+    this.httpServer = new http.Server(app);
   }
 
-  async start(){
-    if(mongoose.connection.readyState !== 1){
-      await Storage.start({});
+  async start() {
+    if (this.configService.isDisabled('api')) {
+      logger.info(`Disabled API Service`);
+      return;
     }
-    const server = app.listen(this.port, () => {
-      logger.info(`API server started on port ${this.port}`);
+    if (!this.storageService.connected) {
+      await this.storageService.start({});
+    }
+    this.httpServer.timeout = this.timeout;
+    this.httpServer.listen(this.port, () => {
+      logger.info(`Starting API Service on port ${this.port}`);
+      this.socketService.start({ server: this.httpServer });
     });
-    server.timeout = this.timeout;
+    return this.httpServer;
   }
 
-  stop(){}
-
+  stop() {
+    return new Promise(resolve => {
+      this.httpServer.close(resolve);
+    });
+  }
 }
 
 // TOOO: choose a place in the config for the API timeout and include it here

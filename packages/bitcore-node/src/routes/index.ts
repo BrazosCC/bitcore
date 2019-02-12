@@ -1,10 +1,18 @@
 import config from '../config';
 import { Request, Response } from 'express';
 import express from 'express';
+import cors from 'cors';
+import { LogMiddleware, CacheMiddleware, CacheTimes, RateLimiter } from './middleware';
+import { Web3Proxy } from "./web3";
 
 const app = express();
 const bodyParser = require('body-parser');
-app.use(bodyParser.json());
+app.use(RateLimiter('GLOBAL', 10, 200, 4000));
+app.use(
+  bodyParser.json({
+    limit: 100000000
+  })
+);
 app.use(
   bodyParser.raw({
     limit: 100000000
@@ -47,6 +55,11 @@ function getRouterFromFile(path) {
   return router;
 }
 
+app.use(cors());
+app.use(LogMiddleware());
+app.use(CacheMiddleware(CacheTimes.Second));
+app.use('/api', getRouterFromFile('status'));
+
 app.use('/api/:chain/:network', (req: Request, resp: Response, next: any) => {
   let { chain, network } = req.params;
   const hasChain = chains.includes(chain);
@@ -55,21 +68,15 @@ app.use('/api/:chain/:network', (req: Request, resp: Response, next: any) => {
   const hasNetworkForChain = hasChainNetworks ? chainNetworks[network] : false;
 
   if (chain && !hasChain) {
-    return resp
-      .status(500)
-      .send(`This node is not configured for the chain ${chain}`);
+    return resp.status(500).send(`This node is not configured for the chain ${chain}`);
   }
   if (network && (!hasChainNetworks || !hasNetworkForChain)) {
-    return resp
-      .status(500)
-      .send(
-        `This node is not configured for the network ${network} on chain ${chain}`
-      );
+    return resp.status(500).send(`This node is not configured for the network ${network} on chain ${chain}`);
   }
   return next();
 });
 
 app.use('/api/:chain/:network', bootstrap('api'));
-app.use('/', getRouterFromFile('admin'));
+app.use('/web3/:chain/:network', Web3Proxy);
 
 export default app;

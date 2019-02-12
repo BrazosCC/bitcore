@@ -1,62 +1,77 @@
-import { CoinModel } from './coin';
-import { TransactionModel } from './transaction';
+import { valueOrDefault } from '../utils/check';
+import { CoinStorage } from './coin';
+import { TransactionStorage } from './transaction';
 import { TransformOptions } from '../types/TransformOptions';
-import { ChainNetwork } from '../types/ChainNetwork';
 import { LoggifyClass } from '../decorators/Loggify';
 import { Bitcoin } from '../types/namespaces/Bitcoin';
-import { BaseModel } from './base';
+import { BaseModel, MongoBound } from './base';
 import logger from '../logger';
+import { IBlock } from '../types/Block';
+import { SpentHeightIndicators } from '../types/Coin';
+import { EventStorage } from './events';
+import config from '../config';
+import { StorageService } from '../services/storage';
 
-export type IBlock = {
-  chain: string;
-  network: string;
-  height: number;
-  hash: string;
-  version: number;
-  merkleRoot: string;
-  time: number;
-  timeNormalized: number;
-  nonce: number;
-  previousBlockHash: string;
-  nextBlockHash: string;
-  transactionCount: number;
-  size: number;
-  bits: number;
-  reward: number;
-  processed: boolean;
-};
+export { IBlock };
 
 @LoggifyClass
-export class Block extends BaseModel<IBlock> {
-  constructor() {
-    super('blocks');
+export class BlockModel extends BaseModel<IBlock> {
+  constructor(storage?: StorageService) {
+    super('blocks', storage);
   }
 
+  chainTips: Mapping<Mapping<IBlock>> = {};
+
+  allowedPaging = [
+    {
+      key: 'height' as 'height',
+      type: 'number' as 'number'
+    }
+  ];
+
   async onConnect() {
-    this.collection.createIndex({ hash: 1 });
-    this.collection.createIndex({ chain: 1, network: 1, processed: 1, height: -1 });
-    this.collection.createIndex({ chain: 1, network: 1, timeNormalized: 1 });
-    this.collection.createIndex({ previousBlockHash: 1 });
+    this.collection.createIndex({ hash: 1 }, { background: true });
+    this.collection.createIndex({ chain: 1, network: 1, processed: 1, height: -1 }, { background: true });
+    this.collection.createIndex({ chain: 1, network: 1, timeNormalized: 1 }, { background: true });
+    this.collection.createIndex({ previousBlockHash: 1 }, { background: true });
+    this.wireup();
+  }
+
+  async wireup() {
+    for (let chain of Object.keys(config.chains)) {
+      for (let network of Object.keys(config.chains[chain])) {
+        const tip = await this.getLocalTip({ chain, network });
+        if (tip) {
+          this.chainTips[chain] = { [network]: tip };
+        }
+      }
+    }
   }
 
   async addBlock(params: {
-    block: Bitcoin.Block;
+    block: any;
     parentChain?: string;
     forkHeight?: number;
+    initialSyncComplete: boolean;
     chain: string;
     network: string;
   }) {
-    const { block, chain, network, parentChain, forkHeight } = params;
+    const { block, chain, network, parentChain, forkHeight, initialSyncComplete } = params;
     const header = block.header.toObject();
     const blockTime = header.time * 1000;
 
-    await this.handleReorg({ header, chain, network });
+    const reorg = await this.handleReorg({ header, chain, network });
 
-    const previousBlock = await this.findOne({ hash: header.prevHash, chain, network });
+    if (reorg) {
+      return Promise.reject('reorg');
+    }
+
+    const previousBlock = await this.collection.findOne({ hash: header.prevHash, chain, network });
 
     const blockTimeNormalized = (() => {
-      if (previousBlock && blockTime <= previousBlock.timeNormalized) {
-        return previousBlock.timeNormalized + 1;
+      const prevTime = previousBlock ? previousBlock.timeNormalized : null;
+      if (prevTime && blockTime <= prevTime.getTime()) {
+        return prevTime.getTime() + 1;
       } else {
         return blockTime;
       }
@@ -65,35 +80,41 @@ export class Block extends BaseModel<IBlock> {
     const height = (previousBlock && previousBlock.height + 1) || 1;
     logger.debug('Setting blockheight', height);
 
-    await this.update(
+    const convertedBlock: IBlock = {
+      chain,
+      network,
+      hash: block.hash,
+      height,
+      version: header.version,
+      nextBlockHash: '',
+      previousBlockHash: header.prevHash,
+      merkleRoot: header.merkleRoot,
+      time: new Date(blockTime),
+      timeNormalized: new Date(blockTimeNormalized),
+      bits: header.bits,
+      nonce: header.nonce,
+      transactionCount: block.transactions.length,
+      size: block.toBuffer().length,
+      reward: block.transactions[0].outputAmount,
+      processed: false
+    };
+    await this.collection.updateOne(
       { hash: header.hash, chain, network },
       {
-        $set: {
-          chain,
-          network,
-          hash: block.hash,
-          height,
-          version: header.version,
-          previousBlockHash: header.prevHash,
-          merkleRoot: header.merkleRoot,
-          time: new Date(blockTime),
-          timeNormalized: new Date(blockTimeNormalized),
-          bits: header.bits,
-          nonce: header.nonce,
-          transactionCount: block.transactions.length,
-          size: block.toBuffer().length,
-          reward: block.transactions[0].outputAmount
-        }
+        $set: convertedBlock
       },
       { upsert: true }
     );
 
     if (previousBlock) {
-      await this.updateOne({ chain, network, hash: previousBlock.hash }, { $set: { nextBlockHash: header.hash } });
+      await this.collection.updateOne(
+        { chain, network, hash: previousBlock.hash },
+        { $set: { nextBlockHash: header.hash } }
+      );
       logger.debug('Updating previous block.nextBlockHash ', header.hash);
     }
 
-    await TransactionModel.batchImport({
+    await TransactionStorage.batchImport({
       txs: block.transactions,
       blockHash: header.hash,
       blockTime: new Date(blockTime),
@@ -102,10 +123,25 @@ export class Block extends BaseModel<IBlock> {
       chain,
       network,
       parentChain,
-      forkHeight
+      forkHeight,
+      initialSyncComplete
     });
 
-    return this.update({ hash: header.hash, chain, network }, { $set: { processed: true } });
+    if (initialSyncComplete) {
+      EventStorage.signalBlock(convertedBlock);
+    }
+
+    this.updateCachedChainTip({ block: convertedBlock, height, chain, network });
+    return this.collection.updateOne({ hash: header.hash, chain, network }, { $set: { processed: true } });
+  }
+
+  updateCachedChainTip(params: { block; chain; network; height }) {
+    const { chain, network, block, height } = params;
+    this.chainTips[chain] = valueOrDefault(this.chainTips[chain], {});
+    this.chainTips[chain][network] = valueOrDefault(this.chainTips[chain][network], block);
+    if (this.chainTips[chain][network].height < height) {
+      this.chainTips[chain][network] = block;
+    }
   }
 
   getPoolInfo(coinbase: string) {
@@ -114,55 +150,49 @@ export class Block extends BaseModel<IBlock> {
     return coinbase;
   }
 
-  async getLocalTip(params: ChainNetwork) {
-    const { chain, network } = params;
-    const [bestBlock] = await this.find({ processed: true, chain, network })
-      .sort({ height: -1 })
-      .limit(1)
-      .toArray();
-    return bestBlock || { height: 0 };
+  getLocalTip({ chain, network }) {
+    return this.collection.findOne({ chain, network, processed: true }, { sort: { height: -1 } });
   }
 
-  async getLocatorHashes(params: ChainNetwork) {
-    const { chain, network } = params;
-    const locatorBlocks = await this.find({ processed: true, chain, network })
-      .sort({ height: -1 })
-      .limit(30)
-      .toArray();
-
-    if (locatorBlocks.length < 2) {
-      return [Array(65).join('0')];
-    }
-    return locatorBlocks.map(block => block.hash);
-  }
-
-  async handleReorg(params: { header?: Bitcoin.Block.HeaderObj; chain: string; network: string }) {
+  async handleReorg(params: { header?: Bitcoin.Block.HeaderObj; chain: string; network: string }): Promise<boolean> {
     const { header, chain, network } = params;
-    const localTip = await BlockModel.getLocalTip(params);
-    if (header && localTip.hash === header.prevHash) {
-      return;
+    let localTip = await this.getLocalTip(params);
+    if (header && localTip && localTip.hash === header.prevHash) {
+      return false;
     }
-    if (localTip.height === 0) {
-      return;
+    if (!localTip || localTip.height === 0) {
+      return false;
     }
-    logger.info(`Resetting tip to ${localTip.previousBlockHash}`, { chain, network });
-    await this.remove({ chain, network, height: { $gte: localTip.height } });
-    await TransactionModel.remove({ chain, network, blockHeight: { $gte: localTip.height } });
-    await CoinModel.remove({ chain, network, mintHeight: { $gte: localTip.height } });
-    await CoinModel.update(
+    if (header) {
+      const prevBlock = await this.collection.findOne({ chain, network, hash: header.prevHash });
+      if (prevBlock) {
+        localTip = prevBlock;
+      } else {
+        logger.error(`Previous block isn't in the DB need to roll back until we have a block in common`);
+      }
+    }
+    logger.info(`Resetting tip to ${localTip.height}`, { chain, network });
+    const reorgOps = [
+      this.collection.deleteMany({ chain, network, height: { $gte: localTip.height } }),
+      TransactionStorage.collection.deleteMany({ chain, network, blockHeight: { $gte: localTip.height } }),
+      CoinStorage.collection.deleteMany({ chain, network, mintHeight: { $gte: localTip.height } })
+    ];
+    await Promise.all(reorgOps);
+
+    await CoinStorage.collection.updateMany(
       { chain, network, spentHeight: { $gte: localTip.height } },
-      { $set: { spentTxid: null, spentHeight: -1 } },
-      { multi: true }
+      { $set: { spentTxid: null, spentHeight: SpentHeightIndicators.pending } }
     );
 
     logger.debug('Removed data from above blockHeight: ', localTip.height);
+    return true;
   }
 
-  _apiTransform(block: IBlock, options: TransformOptions): IBlock | string {
-    let transform: IBlock = {
+  _apiTransform(block: Partial<MongoBound<IBlock>>, options: TransformOptions): any {
+    const transform = {
+      _id: block._id,
       chain: block.chain,
       network: block.network,
-      processed: block.processed,
       hash: block.hash,
       height: block.height,
       version: block.version,
@@ -196,4 +226,4 @@ export class Block extends BaseModel<IBlock> {
   }
 }
 
-export let BlockModel = new Block();
+export let BlockStorage = new BlockModel();

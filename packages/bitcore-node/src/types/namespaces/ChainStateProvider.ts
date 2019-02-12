@@ -1,17 +1,27 @@
-import { IBlock } from "../../models/block";
-import { Response } from "express";
-import { IWallet } from "../../models/wallet";
-import { ChainNetwork } from "../../types/ChainNetwork";
+import { TransactionJSON } from '../Transaction';
+import { ObjectId } from 'mongodb';
+import { IBlock } from '../../models/block';
+import { Request, Response } from 'express';
+import { IWallet } from '../../models/wallet';
+import { ChainNetwork } from '../../types/ChainNetwork';
+import { StreamingFindOptions } from '../../services/storage';
+import { MongoBound } from '../../models/base';
+import { ITransaction } from '../../models/transaction';
+import { AuthheadJSON } from '../Authhead';
+import { CoinListingJSON } from '../Coin';
+import { DailyTransactionsJSON } from '../stats';
 export declare namespace CSP {
   export type StreamWalletTransactionsArgs = {
     startBlock: number;
     endBlock: number;
-    startDate: Date;
-    endDate: Date;
-  };
+    startDate: string;
+    endDate: string;
+    includeMempool: boolean;
+  } & StreamingFindOptions<ITransaction>;
 
   export type StreamAddressUtxosArgs = {
     unspent: boolean;
+    limit: number;
   };
 
   export type GetBlockArgs = { limit: null | number };
@@ -25,11 +35,19 @@ export declare namespace CSP {
     walletId: string;
   };
   export type GetBlockParams = ChainNetwork & {
-    blockId: string;
+    blockId?: string;
+    sinceBlock?: number | string;
+    args?: Partial<{ startDate: Date; endDate: Date; date: Date } & StreamingFindOptions<IBlock>>;
   };
-  export type GetBlocksParams = ChainNetwork & {
+  export type StreamBlocksParams = ChainNetwork & {
+    blockId?: string;
     sinceBlock: number | string;
-    args: { limit: number };
+    args?: Partial<{ startDate: Date; endDate: Date; date: Date } & StreamingFindOptions<IBlock>>;
+    req: Request;
+    res: Response;
+  };
+  export type GetEstimateSmartFeeParams = ChainNetwork & {
+    target: number;
   };
   export type BroadcastTransactionParams = ChainNetwork & {
     rawTx: string;
@@ -38,64 +56,89 @@ export declare namespace CSP {
   export type GetWalletParams = ChainNetwork & PubKey;
 
   export type UpdateWalletParams = ChainNetwork & {
-    wallet: IWallet;
+    wallet: MongoBound<IWallet>;
     addresses: string[];
   };
 
   export type GetWalletBalanceParams = ChainNetwork & {
-    wallet: IWallet
-  }
+    wallet: MongoBound<IWallet>;
+  };
 
   export type StreamAddressUtxosParams = ChainNetwork & {
     address: string;
-    stream: Response;
+    req: Request;
+    res: Response;
     args: StreamAddressUtxosArgs;
   };
+
   export type StreamTransactionsParams = ChainNetwork & {
-    stream: Response;
+    req: Request;
+    res: Response;
     args: any;
   };
   export type StreamTransactionParams = ChainNetwork & {
     txId: string;
-    stream: Response;
   };
   export type StreamWalletAddressesParams = ChainNetwork & {
-    walletId: IWallet;
-    stream: Response;
+    walletId: ObjectId;
+    req: Request;
+    res: Response;
+    limit: number;
   };
+
+  export type WalletCheckParams = ChainNetwork & {
+    wallet: ObjectId;
+  };
+
+  export type StreamWalletMissingAddressesParams = ChainNetwork & {
+    pubKey: string;
+    req: Request;
+    res: Response;
+  };
+
   export type StreamWalletTransactionsParams = ChainNetwork & {
-    wallet: IWallet;
-    stream: Response;
+    wallet: MongoBound<IWallet>;
+    req: Request;
+    res: Response;
     args: StreamWalletTransactionsArgs;
   };
-  export type StreamWalletUtxosArgs = { includeSpent: "true" | undefined };
+  export type StreamWalletUtxosArgs = { includeSpent: 'true' | undefined };
   export type StreamWalletUtxosParams = ChainNetwork & {
-    wallet: IWallet;
+    wallet: MongoBound<IWallet>;
+    limit: number;
     args: Partial<StreamWalletUtxosArgs>;
-    stream: Response;
+    req: Request;
+    res: Response;
   };
 
   export type Provider<T> = { get(params: { chain: string }): T };
-  export type ChainStateProvider = Provider<IChainStateService> &
-    IChainStateService;
+  export type ChainStateProvider = Provider<IChainStateService> & IChainStateService;
   export interface IChainStateService {
-    getBalanceForAddress(params: GetBalanceForAddressParams): Promise<{balance: number}[]>;
-    getBalanceForWallet(params: GetBalanceForWalletParams): Promise<{balance: number}[]>;
+    getBalanceForAddress(params: GetBalanceForAddressParams): Promise<{ confirmed: number, unconfirmed: number, balance: number }>;
+    getBalanceForWallet(params: GetBalanceForWalletParams): Promise<{ confirmed: number, unconfirmed: number, balance: number }>;
     getBlock(params: GetBlockParams): Promise<IBlock | string>;
-    getBlocks(params: GetBlocksParams): Promise<Array<IBlock>>;
+    streamBlocks(params: StreamBlocksParams): any;
+    getFee(params: GetEstimateSmartFeeParams): any;
     broadcastTransaction(params: BroadcastTransactionParams): Promise<any>;
     createWallet(params: CreateWalletParams): Promise<IWallet>;
-    getWallet(params: GetWalletParams): Promise<IWallet| null>;
+    getWallet(params: GetWalletParams): Promise<IWallet | null>;
     updateWallet(params: UpdateWalletParams): Promise<{}>;
-    getWalletBalance(params: GetWalletBalanceParams): Promise<{balance: number}[]>;
+    getWalletBalance(params: GetWalletBalanceParams): Promise<{ confirmed: number, unconfirmed: number, balance: number }>;
     streamAddressUtxos(params: StreamAddressUtxosParams): any;
+    streamAddressTransactions(params: StreamAddressUtxosParams): any;
     streamTransactions(params: StreamTransactionsParams): any;
-    streamTransaction(params: StreamTransactionParams): any;
+    getAuthhead(params: StreamTransactionParams): Promise<AuthheadJSON | undefined>;
+    getDailyTransactions(params: { chain: string; network: string }): Promise<DailyTransactionsJSON>;
+    getTransaction(params: StreamTransactionParams): Promise<TransactionJSON | string | undefined>;
     streamWalletAddresses(params: StreamWalletAddressesParams): any;
+    walletCheck(params: WalletCheckParams): any;
     streamWalletTransactions(params: StreamWalletTransactionsParams): any;
     streamWalletUtxos(params: StreamWalletUtxosParams): any;
+    streamMissingWalletAddresses(params: StreamWalletMissingAddressesParams);
+    getCoinsForTx(params: { chain: string; network: string; txid: string }): Promise<CoinListingJSON>;
+    getLocalTip(params): Promise<any>;
+    getLocatorHashes(params): Promise<any>;
   }
 
   type ChainStateServices = { [key: string]: IChainStateService };
 }
-
