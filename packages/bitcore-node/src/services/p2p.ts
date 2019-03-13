@@ -427,9 +427,8 @@ export class P2pWorker {
         if (this.isSyncingNode) {
           logger.info(`This worker is no longer syncing node for ${this.chain} ${this.network}`);
           this.isSyncingNode = false;
-          await wait(100000);
         }
-        await wait(10000);
+        await wait(1000);
         StateStorage.selfNominateSyncingNode({
           chain: this.chain,
           network: this.network,
