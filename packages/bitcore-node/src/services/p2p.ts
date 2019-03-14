@@ -426,6 +426,7 @@ export class P2pWorker {
       } else {
         if (this.isSyncingNode) {
           logger.info(`This worker is no longer syncing node for ${this.chain} ${this.network}`);
+          logger.info(`hostname: StateStorage=${hostname} versus os=${os.hostname}`);
           this.isSyncingNode = false;
         }
         await wait(1000);
